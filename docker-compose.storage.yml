@@ -1,0 +1,27 @@
+services:
+  node1:
+    image: python:3.10-slim
+    command: tail -f /dev/null
+    volumes:
+      - node1_data:/data
+  node2:
+    image: python:3.10-slim
+    command: tail -f /dev/null
+    volumes:
+      - node2_data:/data
+  node3:
+    image: python:3.10-slim
+    command: tail -f /dev/null
+    volumes:
+      - node3_data:/data
+  node4:
+    image: python:3.10-slim
+    command: tail -f /dev/null
+    volumes:
+      - node4_data:/data
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:
+  node4_data:
