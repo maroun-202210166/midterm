@@ -1,24 +1,36 @@
+x-node: &node
+  image: dfs-lab
+  build: .
+  command: uvicorn storage_node.app:app --host 0.0.0.0 --port 8000
+  depends_on: [metadata]
+
 services:
+  metadata:
+    image: dfs-lab
+    build: .
+    command: uvicorn metadata_service.app:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+
   node1:
-    image: python:3.10-slim
-    command: tail -f /dev/null
-    volumes:
-      - node1_data:/data
+    <<: *node
+    environment: [NODE_ID=node1]
+    ports: ["8001:8000"]
+    volumes: [node1_data:/data]
   node2:
-    image: python:3.10-slim
-    command: tail -f /dev/null
-    volumes:
-      - node2_data:/data
+    <<: *node
+    environment: [NODE_ID=node2]
+    ports: ["8002:8000"]
+    volumes: [node2_data:/data]
   node3:
-    image: python:3.10-slim
-    command: tail -f /dev/null
-    volumes:
-      - node3_data:/data
+    <<: *node
+    environment: [NODE_ID=node3]
+    ports: ["8003:8000"]
+    volumes: [node3_data:/data]
   node4:
-    image: python:3.10-slim
-    command: tail -f /dev/null
-    volumes:
-      - node4_data:/data
+    <<: *node
+    environment: [NODE_ID=node4]
+    ports: ["8004:8000"]
+    volumes: [node4_data:/data]
 
 volumes:
   node1_data:
