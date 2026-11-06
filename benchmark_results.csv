@@ -1,0 +1,5 @@
+workload,mode,files,logical_MB,stored_MB,overhead_x,upload_s,repair_traffic_MB,repair_s
+small,replication,5000,130.1,390.4,3.0,293.6,297.0,168.2
+small,ec,5000,130.1,260.3,2.0,314.7,195.2,214.4
+large,replication,10,1048.6,3145.7,3.0,58.2,2403.3,39.4
+large,ec,10,1048.6,2097.2,2.0,63.4,1572.9,23.2

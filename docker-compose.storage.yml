@@ -5,27 +5,37 @@ x-node: &node
   depends_on: [metadata]
 
 services:
+  postgres:
+    image: postgres:16
+    environment: [POSTGRES_USER=dfs, POSTGRES_PASSWORD=dfs, POSTGRES_DB=dfs]
+    volumes: [pg_data:/var/lib/postgresql/data]
+
   metadata:
     image: dfs-lab
     build: .
     command: uvicorn metadata_service.app:app --host 0.0.0.0 --port 8000
     ports: ["8000:8000"]
+    environment: [DATABASE_URL=postgresql://dfs:dfs@postgres:5432/dfs]
+    depends_on: [postgres]
 
   node1:
     <<: *node
     environment: [NODE_ID=node1]
     ports: ["8001:8000"]
     volumes: [node1_data:/data]
+
   node2:
     <<: *node
     environment: [NODE_ID=node2]
     ports: ["8002:8000"]
     volumes: [node2_data:/data]
+
   node3:
     <<: *node
     environment: [NODE_ID=node3]
     ports: ["8003:8000"]
     volumes: [node3_data:/data]
+
   node4:
     <<: *node
     environment: [NODE_ID=node4]
@@ -37,3 +47,4 @@ volumes:
   node2_data:
   node3_data:
   node4_data:
+  pg_data:

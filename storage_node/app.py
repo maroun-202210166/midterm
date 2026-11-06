@@ -75,8 +75,16 @@ def health():
 
 
 def stats():
-    count = sum(1 for p in DATA_DIR.rglob("*") if p.is_file() and p.suffix != ".tmp")
-    return {"free_space": shutil.disk_usage(DATA_DIR).free, "chunk_count": count}
+    count, used = 0, 0
+    for p in DATA_DIR.rglob("*"):
+        try:
+            if p.is_file() and p.suffix != ".tmp":
+                used += p.stat().st_size
+                count += 1
+        except FileNotFoundError:
+            pass  # chunk was deleted while we were counting
+    return {"free_space": shutil.disk_usage(DATA_DIR).free, "chunk_count": count,
+            "used_bytes": used}
 
 
 def heartbeat_loop():
@@ -84,8 +92,8 @@ def heartbeat_loop():
         try:
             requests.post(f"{METADATA_URL}/heartbeat", timeout=3,
                           json={"node_id": NODE_ID, "address": ADDRESS, **stats()})
-        except requests.RequestException:
-            pass  # metadata service not reachable, try again next round
+        except Exception:
+            pass  # metadata service not reachable (or any other error): never stop the heartbeat
         time.sleep(HEARTBEAT_INTERVAL)
 
 
