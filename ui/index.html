@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed Storage</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; background: #f4f6f8; color: #222; }
+  header { background: #1f3a5f; color: #fff; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 20px; margin: 0; flex: 1; }
+  header input { padding: 6px; border-radius: 4px; border: none; width: 190px; }
+  nav { background: #fff; border-bottom: 1px solid #ddd; padding: 0 24px; }
+  nav button { background: none; border: none; padding: 14px 18px; font-size: 15px; cursor: pointer; border-bottom: 3px solid transparent; }
+  nav button.active { border-bottom-color: #1f3a5f; font-weight: bold; }
+  main { padding: 24px; max-width: 1100px; margin: auto; }
+  .card { background: #fff; border-radius: 6px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input, select { padding: 7px; border: 1px solid #bbb; border-radius: 4px; }
+  button.btn { background: #1f3a5f; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; }
+  button.btn.red { background: #b3261e; }
+  button.btn.small { padding: 4px 10px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+  th { background: #f0f3f6; }
+  .msg { padding: 10px; border-radius: 4px; margin-bottom: 12px; }
+  .ok { background: #e3f4e5; } .err { background: #fde7e7; }
+  .tag { background: #e6edf7; border-radius: 10px; padding: 2px 8px; font-size: 12px; margin-right: 4px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stat { background: #fff; border-radius: 6px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.1); min-width: 150px; }
+  .stat b { display: block; font-size: 26px; }
+  .up { color: #1b7f32; font-weight: bold; } .down { color: #b3261e; font-weight: bold; }
+  .bar { background: #e6edf7; height: 16px; border-radius: 4px; width: 100%; }
+  .bar div { background: #1f3a5f; height: 16px; border-radius: 4px; }
+  .banner { padding: 12px; border-radius: 6px; margin-bottom: 16px; font-weight: bold; }
+  .banner.good { background: #e3f4e5; } .banner.warn { background: #fff3cd; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Distributed Object Storage</h1>
+    <input type="password" v-model="apiKey" placeholder="API key" @keyup.enter="saveKey">
+    <button class="btn" id="save-key" @click="saveKey">Connect</button>
+  </header>
+  <nav>
+    <button :class="{active: tab === 'objects'}" @click="tab = 'objects'">Objects</button>
+    <button :class="{active: tab === 'cluster'}" @click="tab = 'cluster'">Cluster</button>
+    <button :class="{active: tab === 'search'}" @click="tab = 'search'">Search</button>
+  </nav>
+
+  <main>
+    <div v-if="message" :class="['msg', isError ? 'err' : 'ok']" id="message">{{ message }}</div>
+
+    <!-- ============ OBJECTS ============ -->
+    <div v-if="tab === 'objects'">
+      <div class="card">
+        <div class="row">
+          <b>Bucket:</b>
+          <select v-model="bucket" id="bucket-select" @change="loadObjects">
+            <option v-for="b in buckets" :key="b.bucket" :value="b.bucket">{{ b.bucket }} ({{ b.mode }})</option>
+          </select>
+          <input v-model="newBucket" placeholder="new bucket name" id="new-bucket">
+          <select v-model="newMode">
+            <option value="replication">replication</option>
+            <option value="ec">erasure coding</option>
+          </select>
+          <button class="btn" id="create-bucket" @click="createBucket">Create bucket</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <b>Upload</b>
+        <div class="row" style="margin-top: 8px">
+          <input type="file" id="file-input" @change="pickFile">
+          <input v-model="objectKey" placeholder="object key (e.g. docs/a.txt)" id="object-key" size="28">
+          <input v-model="tagsText" placeholder="tags (type:video, owner:me)" id="tags" size="28">
+          <button class="btn" id="upload" @click="upload">Upload</button>
+        </div>
+        <div v-if="progress !== null" style="margin-top: 10px">
+          <div class="bar"><div :style="{width: progress + '%'}"></div></div>
+          <small>{{ progress }}%</small>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="margin-bottom: 10px">
+          <b>Objects in {{ bucket || '...' }}</b>
+          <input v-model="prefix" placeholder="key prefix" id="prefix" @keyup.enter="loadObjects">
+          <button class="btn small" @click="loadObjects">Filter</button>
+        </div>
+        <table id="objects-table">
+          <tr><th>Key</th><th>Size</th><th>Version</th><th>Created</th><th>Tags</th><th></th></tr>
+          <tr v-for="o in objects" :key="o.key">
+            <td>{{ o.key }}</td>
+            <td>{{ formatBytes(o.size) }}</td>
+            <td>{{ o.version }}</td>
+            <td>{{ o.created_at.slice(0, 19).replace('T', ' ') }}</td>
+            <td><span class="tag" v-for="(v, k) in o.tags" :key="k">{{ k }}:{{ v }}</span></td>
+            <td>
+              <button class="btn small" @click="download(bucket, o.key)">Download</button>
+              <button class="btn small red" @click="remove(bucket, o.key)">Delete</button>
+            </td>
+          </tr>
+          <tr v-if="objects.length === 0"><td colspan="6">No objects.</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ============ CLUSTER ============ -->
+    <div v-if="tab === 'cluster' && cluster">
+      <div :class="['banner', cluster.degraded_chunks > 0 ? 'warn' : 'good']" id="repair-banner">
+        <span v-if="cluster.degraded_chunks > 0">Repair in progress: {{ cluster.degraded_chunks }} chunks on failed nodes are being rebuilt.</span>
+        <span v-else>All objects are fully protected.</span>
+      </div>
+      <div class="stats" style="margin-bottom: 16px">
+        <div class="stat"><b>{{ cluster.alive_nodes }} / {{ cluster.alive_nodes + cluster.dead_nodes }}</b>nodes alive</div>
+        <div class="stat"><b>{{ cluster.degraded_objects }}</b>degraded objects</div>
+        <div class="stat"><b>{{ cluster.degraded_chunks }}</b>degraded chunks</div>
+        <div class="stat"><b>{{ cluster.repair.repaired }}</b>chunks repaired</div>
+        <div class="stat"><b>{{ cluster.repair.scrub_fixed }}</b>fixed by scrubber</div>
+      </div>
+      <div class="card">
+        <b>Node health and chunk distribution</b>
+        <table id="nodes-table" style="margin-top: 8px">
+          <tr><th>Node</th><th>Status</th><th>Chunks</th><th style="width: 30%">Distribution</th><th>Used</th><th>Free space</th></tr>
+          <tr v-for="n in sortedNodes" :key="n.node_id">
+            <td>{{ n.node_id }}</td>
+            <td><span :class="n.alive ? 'up' : 'down'">{{ n.alive ? 'UP' : 'DOWN' }}</span></td>
+            <td>{{ n.chunk_count }}</td>
+            <td><div class="bar"><div :style="{width: barWidth(n.chunk_count) + '%'}"></div></div></td>
+            <td>{{ formatBytes(n.used_bytes) }}</td>
+            <td>{{ formatBytes(n.free_space) }}</td>
+          </tr>
+        </table>
+        <small>Refreshes every 3 seconds.</small>
+      </div>
+    </div>
+
+    <!-- ============ SEARCH ============ -->
+    <div v-if="tab === 'search'">
+      <div class="card">
+        <div class="row">
+          <input v-model="query" id="query" placeholder="search key, bucket or tag (e.g. report, type:video)" size="50" @keyup.enter="runSearch">
+          <button class="btn" id="search-btn" @click="runSearch">Search</button>
+          <button class="btn small" @click="reindex">Re-index all objects</button>
+        </div>
+        <small>Search is done by Elasticsearch over the object metadata.</small>
+      </div>
+      <div class="card" v-if="results !== null">
+        <b>{{ results.length }} result(s)</b>
+        <table id="results-table" style="margin-top: 8px">
+          <tr><th>Bucket</th><th>Key</th><th>Size</th><th>Tags</th><th></th></tr>
+          <tr v-for="o in results" :key="o.bucket + '/' + o.key">
+            <td>{{ o.bucket }}</td><td>{{ o.key }}</td><td>{{ formatBytes(o.size) }}</td>
+            <td><span class="tag" v-for="(v, k) in o.tags" :key="k">{{ k }}:{{ v }}</span></td>
+            <td><button class="btn small" @click="download(o.bucket, o.key)">Download</button></td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="vue.global.prod.js"></script>
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    return {
+      apiKey: localStorage.getItem('apiKey') || '', tab: 'objects',
+      message: '', isError: false,
+      buckets: [], bucket: '', newBucket: '', newMode: 'replication',
+      objects: [], prefix: '',
+      file: null, objectKey: '', tagsText: '', progress: null,
+      cluster: null, timer: null,
+      query: '', results: null,
+    };
+  },
+  computed: {
+    // nodes in a fixed order (node1, node2, ...) instead of the order of their heartbeats
+    sortedNodes() {
+      return [...this.cluster.nodes].sort((a, b) => a.node_id.localeCompare(b.node_id, undefined, { numeric: true }));
+    },
+  },
+  mounted() {
+    if (this.apiKey) this.run(() => this.loadBuckets());
+    this.timer = setInterval(() => { if (this.tab === 'cluster') this.loadCluster(); }, 3000);
+  },
+  watch: {
+    tab(t) { this.show(''); if (t === 'cluster') this.loadCluster(); }
+  },
+  methods: {
+    // ---- helpers ----
+    show(text, error = false) { this.message = text; this.isError = error; },
+    formatBytes(n) {
+      if (n === null || n === undefined) return '-';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return (i === 0 ? n : n.toFixed(1)) + ' ' + units[i];
+    },
+    barWidth(count) {
+      const max = Math.max(1, ...this.cluster.nodes.map(n => n.chunk_count));
+      return Math.round(count / max * 100);
+    },
+    path(key) { return key.split('/').map(encodeURIComponent).join('/'); },
+    // every request goes through the gateway (/api) with the API key
+    async api(url, options = {}) {
+      const res = await fetch('/api' + url, { ...options, headers: { 'X-API-Key': this.apiKey, ...(options.headers || {}) } });
+      if (res.status === 401) throw new Error('Invalid API key');
+      if (res.status === 429) throw new Error('Too many requests, please wait a moment');
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { detail = (await res.json()).detail || detail; } catch (e) {}
+        throw new Error(detail);
+      }
+      return res;
+    },
+    async run(action) {
+      try { await action(); } catch (e) { this.show(e.message, true); }
+    },
+
+    // ---- connection ----
+    saveKey() {
+      localStorage.setItem('apiKey', this.apiKey);
+      this.show('');
+      this.run(async () => { await this.loadBuckets(); this.show('Connected.'); });
+    },
+
+    // ---- buckets and objects ----
+    async loadBuckets() {
+      this.buckets = await (await this.api('/buckets')).json();
+      if (!this.bucket && this.buckets.length) this.bucket = this.buckets[0].bucket;
+      if (this.bucket) await this.loadObjects();
+    },
+    createBucket() {
+      this.run(async () => {
+        const name = this.newBucket.trim();
+        if (!name) throw new Error('Enter a bucket name');
+        await this.api('/buckets/' + encodeURIComponent(name) + '?mode=' + this.newMode, { method: 'POST' });
+        this.bucket = name; this.newBucket = '';
+        await this.loadBuckets();
+        this.show('Bucket created.');
+      });
+    },
+    loadObjects() {
+      return this.run(async () => {
+        if (!this.bucket) return;
+        const r = await this.api('/buckets/' + encodeURIComponent(this.bucket) + '/objects?prefix=' + encodeURIComponent(this.prefix));
+        this.objects = (await r.json()).objects;
+      });
+    },
+    pickFile(e) {
+      this.file = e.target.files[0] || null;
+      if (this.file) this.objectKey = this.file.name;
+    },
+    upload() {
+      if (!this.bucket) return this.show('Create or choose a bucket first', true);
+      if (!this.file) return this.show('Choose a file first', true);
+      const tags = this.tagsText.split(',').map(t => t.trim()).filter(Boolean)
+        .map(t => 'tag=' + encodeURIComponent(t)).join('&');
+      const url = '/api/buckets/' + encodeURIComponent(this.bucket) + '/objects/' + this.path(this.objectKey || this.file.name)
+        + (tags ? '?' + tags : '');
+      const xhr = new XMLHttpRequest();         // XMLHttpRequest gives us upload progress
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('X-API-Key', this.apiKey);
+      this.progress = 0;
+      xhr.upload.onprogress = e => { if (e.lengthComputable) this.progress = Math.round(e.loaded / e.total * 100); };
+      xhr.onload = () => {
+        this.progress = null;
+        if (xhr.status === 200) {
+          const r = JSON.parse(xhr.responseText);
+          this.show(`Uploaded ${r.key}: ${r.chunks} chunk(s), ${r.new_chunks} new, ${r.deduplicated_chunks} deduplicated.`);
+          this.loadObjects();
+        } else {
+          let d = xhr.statusText; try { d = JSON.parse(xhr.responseText).detail || d; } catch (e) {}
+          this.show('Upload failed: ' + d, true);
+        }
+      };
+      xhr.onerror = () => { this.progress = null; this.show('Upload failed: network error', true); };
+      xhr.send(this.file);
+    },
+    download(bucket, key) {
+      this.run(async () => {
+        const res = await this.api('/buckets/' + encodeURIComponent(bucket) + '/objects/' + this.path(key));
+        const url = URL.createObjectURL(await res.blob());
+        const a = document.createElement('a');
+        a.href = url; a.download = key.split('/').pop();
+        a.click(); URL.revokeObjectURL(url);
+      });
+    },
+    remove(bucket, key) {
+      if (!confirm('Delete ' + key + '?')) return;
+      this.run(async () => {
+        await this.api('/buckets/' + encodeURIComponent(bucket) + '/objects/' + this.path(key), { method: 'DELETE' });
+        this.show('Deleted ' + key);
+        await this.loadObjects();
+      });
+    },
+
+    // ---- cluster ----
+    loadCluster() {
+      return this.run(async () => { this.cluster = await (await this.api('/cluster/status')).json(); });
+    },
+
+    // ---- search (Elasticsearch) ----
+    runSearch() {
+      this.run(async () => {
+        const r = await this.api('/search?q=' + encodeURIComponent(this.query));
+        this.results = (await r.json()).objects;
+      });
+    },
+    reindex() {
+      this.run(async () => {
+        const r = await (await this.api('/search/reindex', { method: 'POST' })).json();
+        this.show(r.indexed + ' objects indexed.');
+      });
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

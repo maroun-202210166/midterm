@@ -14,9 +14,29 @@ services:
     image: dfs-lab
     build: .
     command: uvicorn metadata_service.app:app --host 0.0.0.0 --port 8000
+    restart: on-failure
     ports: ["8000:8000"]
-    environment: [DATABASE_URL=postgresql://dfs:dfs@postgres:5432/dfs]
+    environment: [DATABASE_URL=postgresql://dfs:dfs@postgres:5432/dfs, ELASTIC_URL=http://elasticsearch:9200]
     depends_on: [postgres]
+
+  gateway:
+    image: dfs-lab
+    build: .
+    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000
+    ports: ["8080:8000"]
+    environment: [METADATA_URL=http://metadata:8000, "API_KEYS=secret-midterm-key,rate-test-key", RATE_LIMIT=100]
+    depends_on: [metadata]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment: [discovery.type=single-node, xpack.security.enabled=false, "ES_JAVA_OPTS=-Xms512m -Xmx512m"]
+    ports: ["9200:9200"]
+    volumes: [es_data:/usr/share/elasticsearch/data]
+
+  ui:
+    build: ./ui
+    ports: ["8081:80"]
+    depends_on: [gateway]
 
   node1:
     <<: *node
@@ -48,3 +68,4 @@ volumes:
   node3_data:
   node4_data:
   pg_data:
+  es_data:

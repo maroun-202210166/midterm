@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS chunk_refs (
     hash TEXT PRIMARY KEY, size INT, refcount INT NOT NULL, nodes JSONB
 );
 ALTER TABLE chunk_refs ADD COLUMN IF NOT EXISTS shards JSONB;
+ALTER TABLE objects ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS buckets (name TEXT PRIMARY KEY, mode TEXT NOT NULL);
 """
 
@@ -118,14 +119,14 @@ def bucket_mode(name):
         return row[0] if row else "replication"
 
 
-def add_object(bucket, key, size, mode, chunks):
+def add_object(bucket, key, size, mode, chunks, tags=None):
     with cursor() as cur:
         cur.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM objects "
                     "WHERE bucket = %s AND key = %s", (bucket, key))
         version = cur.fetchone()[0]
-        cur.execute("INSERT INTO objects (bucket, key, version, size, chunking, chunks) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (bucket, key, version, size, mode, Json(chunks)))
+        cur.execute("INSERT INTO objects (bucket, key, version, size, chunking, chunks, tags) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (bucket, key, version, size, mode, Json(chunks), Json(tags or {})))
         return version
 
 
@@ -156,3 +157,102 @@ def stats():
         return {"unique_chunks": unique, "unique_bytes": int(unique_bytes),
                 "logical_bytes": int(logical_bytes),
                 "dedup_ratio": round(logical_bytes / unique_bytes, 2) if unique_bytes else None}
+
+
+# ---------- Task 5: listing, search, metadata, cluster status ----------
+def list_buckets():
+    with cursor() as cur:
+        cur.execute("SELECT name, mode FROM buckets UNION "
+                    "SELECT DISTINCT bucket, 'replication' FROM objects "
+                    "WHERE bucket NOT IN (SELECT name FROM buckets) ORDER BY 1")
+        return [{"bucket": n, "mode": m} for n, m in cur.fetchall()]
+
+
+def search_objects(bucket, prefix="", min_size=None, max_size=None, after=None, before=None, tags=None):
+    """Latest version of every object in the bucket that matches all the given filters."""
+    sql = ("SELECT key, version, size, created_at, tags FROM ("
+           " SELECT DISTINCT ON (key) key, version, size, created_at, tags FROM objects"
+           " WHERE bucket = %s AND key LIKE %s ORDER BY key, version DESC) latest WHERE true")
+    like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    args = [bucket, like]
+    if min_size is not None:
+        sql += " AND size >= %s"
+        args.append(min_size)
+    if max_size is not None:
+        sql += " AND size <= %s"
+        args.append(max_size)
+    if after:
+        sql += " AND created_at >= %s"
+        args.append(after)
+    if before:
+        sql += " AND created_at <= %s"
+        args.append(before)
+    if tags:
+        sql += " AND tags @> %s"
+        args.append(Json(tags))
+    with cursor() as cur:
+        cur.execute(sql + " ORDER BY key", args)
+        return [{"key": k, "version": v, "size": sz, "created_at": c.isoformat(), "tags": t}
+                for k, v, sz, c, t in cur.fetchall()]
+
+
+def object_meta(bucket, key, version=None):
+    q = "SELECT version, size, chunking, chunks, created_at, tags FROM objects WHERE bucket = %s AND key = %s"
+    with cursor() as cur:
+        if version is None:
+            cur.execute(q + " ORDER BY version DESC LIMIT 1", (bucket, key))
+        else:
+            cur.execute(q + " AND version = %s", (bucket, key, version))
+        row = cur.fetchone()
+    if not row:
+        return None
+    v, size, chunking, chunks, created, tags = row
+    return {"bucket": bucket, "key": key, "version": v, "size": size, "chunking": chunking,
+            "created_at": created.isoformat(), "tags": tags, "chunk_count": len(chunks), "chunks": chunks}
+
+
+def chunk_sizes(hashes):
+    with cursor() as cur:
+        cur.execute("SELECT hash, size FROM chunk_refs WHERE hash = ANY(%s)", (list(hashes),))
+        return dict(cur.fetchall())
+
+
+def degraded(dead_nodes):
+    """(chunks with a copy/shard on a dead node, objects that use such chunks)."""
+    with cursor() as cur:
+        cur.execute("SELECT array_agg(hash) FROM chunk_refs WHERE nodes ?| %s", (list(dead_nodes),))
+        hashes = cur.fetchone()[0] or []
+        if not hashes:
+            return 0, 0
+        cur.execute("SELECT count(*) FROM objects WHERE chunks ?| %s", (hashes,))
+        return len(hashes), cur.fetchone()[0]
+
+
+def all_latest_objects():
+    with cursor() as cur:
+        cur.execute("SELECT DISTINCT ON (bucket, key) bucket, key, version, size, created_at, tags "
+                    "FROM objects ORDER BY bucket, key, version DESC")
+        return [{"bucket": b, "key": k, "version": v, "size": sz, "created_at": c.isoformat(), "tags": t}
+                for b, k, v, sz, c, t in cur.fetchall()]
+
+
+# ---------- Task 7: garbage collection ----------
+def _placed_on(rows, node):
+    """Hashes placed on `node` by these chunk_refs rows: whole chunks (replication) or shards (EC)."""
+    return {h if shards is None else shards[i]
+            for h, node_list, shards in rows for i, t in enumerate(node_list) if t == node}
+
+
+def locations_on(node):
+    """Hashes the metadata places on `node`."""
+    with cursor() as cur:
+        cur.execute("SELECT hash, nodes, shards FROM chunk_refs WHERE nodes @> %s", (Json([node]),))
+        return _placed_on(cur.fetchall(), node)
+
+
+def is_expected(lh, node):
+    """True if the chunk or shard `lh` is (now) placed on `node`."""
+    with cursor() as cur:
+        cur.execute("SELECT hash, nodes, shards FROM chunk_refs WHERE nodes @> %s AND (hash = %s OR shards ? %s)",
+                    (Json([node]), lh, lh))
+        return lh in _placed_on(cur.fetchall(), node)

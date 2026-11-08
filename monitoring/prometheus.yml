@@ -1,0 +1,10 @@
+# Task 7: Prometheus reads the metrics of the two gateways and of the metadata service every 5 seconds.
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: gateways
+    static_configs:
+      - targets: ["gateway1:8000", "gateway2:8000"]
+  - job_name: metadata
+    static_configs:
+      - targets: ["metadata:8000"]

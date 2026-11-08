@@ -69,6 +69,12 @@ def delete_chunk(h: str):
     return {"status": "deleted", "hash": h}
 
 
+@app.get("/chunks")
+def list_chunks():
+    """Hashes of all the chunks stored on this node (used by the garbage collector, Task 7)."""
+    return [p.name for p in DATA_DIR.glob("??/*") if HASH_RE.match(p.name)]
+
+
 @app.get("/health")
 def health():
     return {"node_id": NODE_ID, **stats()}
@@ -99,4 +105,4 @@ def heartbeat_loop():
 
 @app.on_event("startup")
 def start_heartbeat():
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()

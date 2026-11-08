@@ -1,0 +1,184 @@
+# Task 7: the system of Tasks 2-6 plus
+#   - an Nginx load balancer ("gateway", port 8080) in front of 2 gateways (gateway1, gateway2)
+#   - RabbitMQ and 2 workers for the repair, rebalance, garbage-collection and scrub jobs
+#   - PostgreSQL replicated on 3 servers (postgres = primary, pg-replica1 and pg-replica2 = standbys)
+#   - Prometheus (port 9090) and Grafana (port 3000)
+# Run: docker compose -f docker-compose.task7.yml up -d --build
+
+x-python: &python
+  image: dfs-lab
+  build: .
+  restart: on-failure                          # e.g. the metadata service starts before the database is ready
+
+x-node: &node
+  <<: *python
+  command: uvicorn storage_node.app:app --host 0.0.0.0 --port 8000
+  depends_on: [metadata]
+
+x-db: &db
+  DATABASE_URL: postgresql://dfs:dfs@postgres:5432,pg-replica1:5432,pg-replica2:5432/dfs?target_session_attrs=read-write&connect_timeout=3
+  RABBITMQ_URL: amqp://dfs:dfs@rabbitmq:5672/%2F?heartbeat=600
+
+# A standby copies the primary once (pg_basebackup), then follows it. If the primary fails and the
+# other standby is promoted, it follows the new primary (target_session_attrs=read-write).
+x-replica: &replica
+  image: postgres:16
+  depends_on: [postgres]
+  command:
+    - bash
+    - -c
+    - |
+      printf '%s\n' 'local all all trust' 'host all all all scram-sha-256' 'host replication all all scram-sha-256' > /etc/pg_hba_dfs.conf
+      mkdir -p "$$PGDATA" && chown postgres:postgres "$$PGDATA" && chmod 700 "$$PGDATA"
+      if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+        until PGPASSWORD=dfs gosu postgres pg_basebackup -h postgres -U dfs -D "$$PGDATA" -X stream -R; do
+          echo "waiting for the primary"; sleep 3
+        done
+        echo "primary_conninfo = 'host=$$OTHERS user=dfs password=dfs target_session_attrs=read-write'" >> "$$PGDATA/postgresql.auto.conf"
+      fi
+      exec gosu postgres postgres -c hba_file=/etc/pg_hba_dfs.conf
+
+services:
+  # ---------- metadata store: PostgreSQL primary + 2 standbys ----------
+  postgres:
+    image: postgres:16
+    environment: [POSTGRES_USER=dfs, POSTGRES_PASSWORD=dfs, POSTGRES_DB=dfs]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    command:
+      - bash
+      - -c
+      - |
+        printf '%s\n' 'local all all trust' 'host all all all scram-sha-256' 'host replication all all scram-sha-256' > /etc/pg_hba_dfs.conf
+        exec docker-entrypoint.sh postgres -c hba_file=/etc/pg_hba_dfs.conf
+
+  pg-replica1:
+    <<: *replica
+    environment: ["OTHERS=postgres,pg-replica2"]
+    volumes: [pg_replica1_data:/var/lib/postgresql/data]
+
+  pg-replica2:
+    <<: *replica
+    environment: ["OTHERS=postgres,pg-replica1"]
+    volumes: [pg_replica2_data:/var/lib/postgresql/data]
+
+  # ---------- job queue and workers ----------
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment: [RABBITMQ_DEFAULT_USER=dfs, RABBITMQ_DEFAULT_PASS=dfs]
+    ports: ["5672:5672", "15672:15672"]          # 15672: RabbitMQ web page (login dfs / dfs)
+
+  worker1:
+    <<: *python
+    command: python -m metadata_service.worker
+    environment:
+      <<: *db
+      WORKER_ID: worker1
+    depends_on: [metadata, rabbitmq]
+
+  worker2:
+    <<: *python
+    command: python -m metadata_service.worker
+    environment:
+      <<: *db
+      WORKER_ID: worker2
+    depends_on: [metadata, rabbitmq]
+
+  # ---------- metadata service ----------
+  metadata:
+    <<: *python
+    command: uvicorn metadata_service.app:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    environment:
+      <<: *db
+      ELASTIC_URL: http://elasticsearch:9200
+    depends_on: [postgres, rabbitmq]
+
+  # ---------- 2 gateways behind the Nginx load balancer ----------
+  gateway1:
+    <<: *python
+    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000
+    environment: [GATEWAY_ID=gateway1, METADATA_URL=http://metadata:8000, "API_KEYS=secret-midterm-key,rate-test-key", RATE_LIMIT=100]
+    depends_on: [metadata]
+
+  gateway2:
+    <<: *python
+    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000
+    environment: [GATEWAY_ID=gateway2, METADATA_URL=http://metadata:8000, "API_KEYS=secret-midterm-key,rate-test-key", RATE_LIMIT=100]
+    depends_on: [metadata]
+
+  gateway:                                       # the load balancer keeps the name and port of the old gateway,
+    image: nginx:alpine                          # so the UI and the tests work without any change
+    volumes: ["./lb/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["8080:8000"]
+    depends_on: [gateway1, gateway2]
+
+  # ---------- search and web UI (Task 6) ----------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment: [discovery.type=single-node, xpack.security.enabled=false, "ES_JAVA_OPTS=-Xms512m -Xmx512m"]
+    ports: ["9200:9200"]
+    volumes: [es_data:/usr/share/elasticsearch/data]
+
+  ui:
+    build: ./ui
+    ports: ["8081:80"]
+    depends_on: [gateway]
+
+  # ---------- monitoring ----------
+  prometheus:
+    image: prom/prometheus
+    ports: ["9090:9090"]
+    volumes: ["./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+
+  grafana:
+    image: grafana/grafana
+    ports: ["3000:3000"]
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true           # open the dashboard without logging in (lab only)
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/dfs.json
+    volumes: ["./monitoring/grafana:/etc/grafana/provisioning:ro"]
+    depends_on: [prometheus]
+
+  # ---------- storage nodes ----------
+  node1:
+    <<: *node
+    environment: [NODE_ID=node1]
+    ports: ["8001:8000"]
+    volumes: [node1_data:/data]
+
+  node2:
+    <<: *node
+    environment: [NODE_ID=node2]
+    ports: ["8002:8000"]
+    volumes: [node2_data:/data]
+
+  node3:
+    <<: *node
+    environment: [NODE_ID=node3]
+    ports: ["8003:8000"]
+    volumes: [node3_data:/data]
+
+  node4:
+    <<: *node
+    environment: [NODE_ID=node4]
+    ports: ["8004:8000"]
+    volumes: [node4_data:/data]
+
+  node5:                                         # extra node for the rebalancing test:
+    <<: *node                                    # docker compose -f docker-compose.task7.yml up -d node5
+    environment: [NODE_ID=node5]
+    ports: ["8005:8000"]
+    volumes: [node5_data:/data]
+    profiles: [extra]
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:
+  node4_data:
+  node5_data:
+  pg_data:
+  pg_replica1_data:
+  pg_replica2_data:
+  es_data:
